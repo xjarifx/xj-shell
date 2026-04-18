@@ -1,54 +1,59 @@
-# xjsh: Custom POSIX Shell
+# xjsh
 
-`xjsh` is a minimal custom command-line interpreter written in C. It directly uses POSIX APIs and does not invoke `bash`, `sh`, `zsh`, `system()`, or external shell tools for built-in commands.
+xjsh is a small POSIX-style shell written in C.
+It is intentionally focused: all supported commands are built in-process and implemented with libc/POSIX syscalls rather than delegating to another shell.
+
+## What This Project Is
+
+- A learning-oriented shell with a clean `REPL -> parser -> dispatcher` design.
+- A practical file-manipulation shell for local filesystem tasks.
+- A codebase that demonstrates safe C patterns for dynamic memory, error propagation, and resource cleanup.
+
+## What This Project Is Not
+
+- It is not a full Unix shell replacement.
+- It does not currently support pipes, redirection, background jobs, or command substitution.
+- It does not execute arbitrary external binaries; only built-in commands are recognized.
 
 ## Features
 
-- Interactive REPL (`read -> parse -> execute -> repeat`)
-- Custom parser with support for quoted arguments
-- Built-in filesystem commands implemented with POSIX calls
-- Relative and absolute path handling through native syscalls
-- Error reporting via `perror` and conventional exit codes
-- Basic in-memory command history
-- `help` command
-- Safety confirmation prompt for `delete`
+- Interactive prompt loop (`xjsh> `)
+- Token parser with:
+  - Whitespace tokenization
+  - Single-quoted and double-quoted arguments
+  - Backslash escaping outside single quotes
+- In-memory command history with automatic growth
+- Filesystem command suite implemented via POSIX APIs
+- Consistent status code semantics across commands
+- Defensive command usage checks and syscall error reporting
 
-## Command Set
+## Quick Start
 
-- `whereami`
-- `showfiles`
-- `enter <path>`
-- `move <source> <destination>`
-- `rename <old> <new>`
-- `delete <path>`
-- `create <filename>`
-- `makedir <dirname>`
-- `removedir <dirname>`
-- `read <filename>`
-- `write <filename> <text...>`
-- `history`
-- `help`
-- `exit [status]`
+### Requirements
 
-## Build
+- Linux or another Unix-like environment
+- C compiler with C11 support
+- `make`
 
-Requirements: a Unix-like system with a C compiler.
+### Build
 
 ```bash
 make
 ```
 
-This produces the executable:
-
-- `./xjsh`
-
-## Run
+Produces the executable:
 
 ```bash
 ./xjsh
 ```
 
-Example session:
+### Run
+
+```bash
+./xjsh
+```
+
+Example:
 
 ```text
 xjsh> whereami
@@ -56,38 +61,124 @@ xjsh> whereami
 xjsh> makedir demo
 xjsh> enter demo
 xjsh> create notes.txt
+xjsh> write notes.txt "hello from xjsh"
 xjsh> read notes.txt
-xjsh> showfiles
-.
-..
-notes.txt
+hello from xjsh
+xjsh> history
+1  whereami
+2  makedir demo
+3  enter demo
+4  create notes.txt
+5  write notes.txt "hello from xjsh"
+6  read notes.txt
+7  history
 xjsh> exit 0
 ```
 
-## Implementation Notes
+## Command Reference
 
-- `whereami`: `getcwd`
-- `showfiles`: `opendir`, `readdir`, `closedir`
-- `enter`: `chdir`
-- `move`/`rename`: `rename`, fallback to `link`+`unlink` on cross-device moves
-- `delete`: `lstat`, then `unlink` or `rmdir` with user confirmation
-- `create`: `open(..., O_CREAT | O_WRONLY | O_TRUNC, 0644)`
-- `makedir`: `mkdir`
-- `removedir`: `rmdir`
-- `read`: `open`, `read`, `write`
-- `write`: `open(..., O_CREAT | O_WRONLY | O_APPEND, 0644)`, `write`
+### Navigation and Listing
 
-## Exit Codes
+- `whereami`
+  - Prints current working directory.
+  - Usage: `whereami`
+- `showfiles`
+  - Lists entries in the current directory (including `.` and `..` where provided by the filesystem).
+  - Usage: `showfiles`
+- `enter <path>`
+  - Changes the shell process working directory.
+  - Usage: `enter /tmp`
 
-- `0`: success
-- `1`: runtime/system call failure
-- `2`: command usage or parse error
-- `127`: unknown command
+### File and Directory Operations
 
-## Project Structure
+- `move <source> <destination>`
+  - Moves or renames a path.
+  - Tries `rename(2)` first.
+  - If the move crosses filesystems (`EXDEV`), falls back to `link(2)` + `unlink(2)`.
+- `rename <old> <new>`
+  - Alias of `move`; uses the same implementation and semantics.
+- `delete <path>`
+  - Deletes file or empty directory after interactive confirmation.
+  - Uses `lstat(2)` to detect target type.
+  - Cancels unless reply starts with `y` or `Y`.
+- `create <filename>`
+  - Creates or truncates a file with mode `0644`.
+- `makedir <dirname>`
+  - Creates a directory with mode `0755`.
+- `removedir <dirname>`
+  - Removes an empty directory.
 
-- `src/main.c`: REPL loop and shell lifecycle
-- `src/parser.c`: tokenizer/parser
-- `src/builtins.c`: command handlers and dispatch
-- `src/history.c`: in-memory history support
-- `include/*.h`: interfaces
+### File Content Operations
+
+- `read <filename>`
+  - Streams file contents to stdout in chunks.
+- `write <filename> <text...>`
+  - Appends text to file and adds trailing newline.
+  - Multiple text arguments are joined with a single space.
+
+### Shell Control
+
+- `history`
+  - Prints command history with 1-based indices.
+- `help`
+  - Prints built-in command help.
+- `exit [status]`
+  - Exits shell with optional integer status.
+  - If omitted, exits with status `0`.
+
+## Status Codes
+
+- `0`: Success
+- `1`: Runtime/system-call failure
+- `2`: Parse or usage error
+- `127`: Unknown command
+
+Note: `exit [status]` sets the shell process exit code directly.
+
+## Parsing Rules
+
+Input lines are parsed into `argc/argv` using the project parser.
+
+- Spaces delimit arguments unless inside quotes.
+- Single quotes `'...'` preserve literal text.
+- Double quotes `"..."` group text similarly.
+- Backslash escapes the next character outside single quotes.
+- Unmatched quote emits `parse error: unmatched quote` and returns status `2`.
+
+## Project Layout
+
+- `src/main.c`: Entry point and REPL loop
+- `src/parser.c`: Tokenizer/parser and command memory management
+- `src/builtins.c`: Command implementations and command dispatcher
+- `src/history.c`: History storage and printing
+- `include/parser.h`: Parser interface (`Command`, `parse_command`, `free_command`)
+- `include/builtins.h`: Dispatcher interface
+- `include/history.h`: History interface
+- `Makefile`: Build configuration and targets
+
+## Build Targets
+
+- `make`: Build `xjsh`
+- `make run`: Build then run shell
+- `make clean`: Remove generated binary
+
+## Architecture Documentation
+
+Detailed internal architecture, module boundaries, and control/data flow are documented in:
+
+- `docs/ARCHITECTURE.md`
+
+## Known Limitations
+
+- No pipeline/redirection syntax (`|`, `>`, `<`, `>>`).
+- No environment variable expansion.
+- No globbing (`*`, `?`) expansion.
+- No external program execution.
+- `delete` removes only files and empty directories (not recursive).
+
+## Development Notes
+
+- POSIX feature test macro `_POSIX_C_SOURCE 200809L` is used in source files.
+- Error paths are explicit and mostly report via `perror`.
+- History is heap-backed and grows geometrically.
+- Command parsing allocates per-token memory and frees all via `free_command`.
