@@ -2,196 +2,127 @@
 
 #include "parser.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static void parser_init_command(struct Command *cmd) {
-    memset(cmd, 0, sizeof(*cmd));
-}
+static int push_arg(Command *cmd, const char *token, size_t len) {
+    char *arg;
+    char **new_argv;
 
-void parser_init_parsed_line(struct ParsedLine *parsed) {
-    memset(parsed, 0, sizeof(*parsed));
-    for (int i = 0; i < MAX_SEGMENTS; i++) {
-        parser_init_command(&parsed->commands[i]);
+    arg = malloc(len + 1);
+    if (!arg) {
+        perror("malloc");
+        return -1;
     }
-}
+    memcpy(arg, token, len);
+    arg[len] = '\0';
 
-static bool is_special_char(char c) {
-    return c == '|' || c == '<' || c == '>' || c == '&';
-}
-
-int parser_tokenize(const char *line, char **tokens, int max_tokens) {
-    int count = 0;
-    size_t i = 0;
-
-    while (line[i] != '\0') {
-        while (line[i] == ' ' || line[i] == '\t') {
-            i++;
-        }
-
-        if (line[i] == '\0') {
-            break;
-        }
-
-        if (count >= max_tokens - 1) {
-            fprintf(stderr, "Too many tokens\n");
-            return -1;
-        }
-
-        if (line[i] == '"') {
-            size_t start = ++i;
-            while (line[i] != '\0' && line[i] != '"') {
-                i++;
-            }
-            if (line[i] != '"') {
-                fprintf(stderr, "Unterminated quote\n");
-                return -1;
-            }
-            tokens[count] = strndup(line + start, i - start);
-            if (tokens[count] == NULL) {
-                perror("strndup");
-                return -1;
-            }
-            count++;
-            i++;
-            continue;
-        }
-
-        if (line[i] == '>' && line[i + 1] == '>') {
-            tokens[count] = strdup(">>");
-            if (tokens[count] == NULL) {
-                perror("strdup");
-                return -1;
-            }
-            count++;
-            i += 2;
-            continue;
-        }
-
-        if (is_special_char(line[i])) {
-            char special[3] = {line[i], '\0', '\0'};
-            tokens[count] = strdup(special);
-            if (tokens[count] == NULL) {
-                perror("strdup");
-                return -1;
-            }
-            count++;
-            i++;
-            continue;
-        }
-
-        size_t start = i;
-        while (line[i] != '\0' &&
-               line[i] != ' ' &&
-               line[i] != '\t' &&
-               !is_special_char(line[i])) {
-            i++;
-        }
-        tokens[count] = strndup(line + start, i - start);
-        if (tokens[count] == NULL) {
-            perror("strndup");
-            return -1;
-        }
-        count++;
-    }
-
-    tokens[count] = NULL;
-    return count;
-}
-
-void parser_free_tokens(char **tokens, int count) {
-    for (int i = 0; i < count; i++) {
-        free(tokens[i]);
-    }
-}
-
-static int attach_redirection(struct Command *cmd, const char *operator, char *target) {
-    if (strcmp(operator, "<") == 0) {
-        if (cmd->input_file != NULL) {
-            fprintf(stderr, "Multiple input redirects are not supported\n");
-            return -1;
-        }
-        cmd->input_file = target;
-        return 0;
-    }
-
-    if (cmd->output_file != NULL) {
-        fprintf(stderr, "Multiple output redirects are not supported\n");
+    new_argv = realloc(cmd->argv, (size_t)(cmd->argc + 2) * sizeof(char *));
+    if (!new_argv) {
+        perror("realloc");
+        free(arg);
         return -1;
     }
 
-    cmd->output_file = target;
-    cmd->append_output = (strcmp(operator, ">>") == 0);
+    cmd->argv = new_argv;
+    cmd->argv[cmd->argc++] = arg;
+    cmd->argv[cmd->argc] = NULL;
     return 0;
 }
 
-int parser_parse_tokens(char **tokens, int token_count, struct ParsedLine *parsed) {
-    int cmd_index = 0;
-    int arg_index = 0;
+int parse_command(const char *line, Command *out_cmd) {
+    const char *p = line;
+    char *token_buf = NULL;
+    size_t cap = 0;
+    size_t len = 0;
+    int in_single = 0;
+    int in_double = 0;
 
-    if (token_count == 0) {
-        return 0;
+    out_cmd->argv = NULL;
+    out_cmd->argc = 0;
+
+    while (*p != '\0') {
+        char c = *p;
+
+        if (!in_single && !in_double && isspace((unsigned char)c)) {
+            if (len > 0) {
+                if (push_arg(out_cmd, token_buf, len) != 0) {
+                    free(token_buf);
+                    free_command(out_cmd);
+                    return -1;
+                }
+                len = 0;
+            }
+            ++p;
+            continue;
+        }
+
+        if (!in_double && c == '\'') {
+            in_single = !in_single;
+            ++p;
+            continue;
+        }
+
+        if (!in_single && c == '"') {
+            in_double = !in_double;
+            ++p;
+            continue;
+        }
+
+        if (!in_single && c == '\\' && p[1] != '\0') {
+            ++p;
+            c = *p;
+        }
+
+        if (len + 1 >= cap) {
+            size_t new_cap = cap == 0 ? 64 : cap * 2;
+            char *new_buf = realloc(token_buf, new_cap);
+            if (!new_buf) {
+                perror("realloc");
+                free(token_buf);
+                free_command(out_cmd);
+                return -1;
+            }
+            token_buf = new_buf;
+            cap = new_cap;
+        }
+
+        token_buf[len++] = c;
+        ++p;
     }
 
-    for (int i = 0; i < token_count; i++) {
-        if (strcmp(tokens[i], "&") == 0) {
-            if (i != token_count - 1) {
-                fprintf(stderr, "Background operator must appear at end\n");
-                return -1;
-            }
-            if (arg_index == 0) {
-                fprintf(stderr, "Missing command before background operator\n");
-                return -1;
-            }
-            parsed->background = true;
-            continue;
-        }
-
-        if (strcmp(tokens[i], "|") == 0) {
-            if (arg_index == 0) {
-                fprintf(stderr, "Invalid null command in pipeline\n");
-                return -1;
-            }
-            parsed->commands[cmd_index].argv[arg_index] = NULL;
-            cmd_index++;
-            if (cmd_index >= MAX_SEGMENTS) {
-                fprintf(stderr, "Too many piped commands\n");
-                return -1;
-            }
-            arg_index = 0;
-            continue;
-        }
-
-        if (strcmp(tokens[i], "<") == 0 ||
-            strcmp(tokens[i], ">") == 0 ||
-            strcmp(tokens[i], ">>") == 0) {
-            if (i + 1 >= token_count) {
-                fprintf(stderr, "Missing filename after redirection operator\n");
-                return -1;
-            }
-            char *target = tokens[i + 1];
-            if (attach_redirection(&parsed->commands[cmd_index], tokens[i], target) != 0) {
-                return -1;
-            }
-            i++;
-            continue;
-        }
-
-        if (arg_index >= MAX_TOKENS - 1) {
-            fprintf(stderr, "Too many arguments\n");
-            return -1;
-        }
-
-        parsed->commands[cmd_index].argv[arg_index++] = tokens[i];
-    }
-
-    if (arg_index == 0) {
-        fprintf(stderr, "Trailing pipe is not allowed\n");
+    if (in_single || in_double) {
+        fprintf(stderr, "parse error: unmatched quote\n");
+        free(token_buf);
+        free_command(out_cmd);
         return -1;
     }
 
-    parsed->commands[cmd_index].argv[arg_index] = NULL;
-    parsed->command_count = cmd_index + 1;
+    if (len > 0) {
+        if (push_arg(out_cmd, token_buf, len) != 0) {
+            free(token_buf);
+            free_command(out_cmd);
+            return -1;
+        }
+    }
+
+    free(token_buf);
     return 0;
+}
+
+void free_command(Command *cmd) {
+    int i;
+
+    if (!cmd || !cmd->argv) {
+        return;
+    }
+
+    for (i = 0; i < cmd->argc; ++i) {
+        free(cmd->argv[i]);
+    }
+    free(cmd->argv);
+    cmd->argv = NULL;
+    cmd->argc = 0;
 }

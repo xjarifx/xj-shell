@@ -3,281 +3,374 @@
 #include "builtins.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
-#include "history.h"
-#include "os_utils.h"
+static int cmd_whereami(int argc, char *argv[]) {
+    char cwd[PATH_MAX];
+    (void)argv;
 
-static int builtin_drift(char **argv) {
-    const char *path = argv[1] ? argv[1] : getenv("HOME");
-    if (path == NULL) {
-        fprintf(stderr, "drift: HOME not set\n");
+    if (argc != 1) {
+        fprintf(stderr, "usage: whereami\n");
+        return 2;
+    }
+
+    if (!getcwd(cwd, sizeof(cwd))) {
+        perror("getcwd");
         return 1;
     }
-    if (chdir(path) != 0) {
-        perror("drift");
-        return 1;
-    }
+
+    puts(cwd);
     return 0;
 }
 
-static int builtin_ground(void) {
-    char *cwd = getcwd(NULL, 0);
-    if (cwd == NULL) {
-        perror("ground");
+static int cmd_showfiles(int argc, char *argv[]) {
+    DIR *dir;
+    struct dirent *entry;
+    (void)argv;
+
+    if (argc != 1) {
+        fprintf(stderr, "usage: showfiles\n");
+        return 2;
+    }
+
+    dir = opendir(".");
+    if (!dir) {
+        perror("opendir");
         return 1;
     }
-    printf("%s\n", cwd);
-    free(cwd);
+
+    while ((entry = readdir(dir)) != NULL) {
+        puts(entry->d_name);
+    }
+
+    if (closedir(dir) != 0) {
+        perror("closedir");
+        return 1;
+    }
+
     return 0;
 }
 
-static int builtin_forge(char **argv) {
-    if (argv[1] == NULL) {
-        fprintf(stderr, "forge: missing filename\n");
+static int cmd_enter(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: enter <path>\n");
+        return 2;
+    }
+
+    if (chdir(argv[1]) != 0) {
+        perror("chdir");
         return 1;
     }
 
-    int fd = open(argv[1], O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd == -1) {
-        perror("forge");
-        return 1;
-    }
-
-    close(fd);
     return 0;
 }
 
-static int write_joined_arguments(int fd, char **argv, int start_index, const char *label) {
-    for (int i = start_index; argv[i] != NULL; i++) {
-        if (os_write_all(fd, argv[i], strlen(argv[i])) < 0) {
-            perror(label);
+static int move_fallback_link_unlink(const char *src, const char *dst) {
+    if (link(src, dst) != 0) {
+        perror("link");
+        return 1;
+    }
+
+    if (unlink(src) != 0) {
+        perror("unlink");
+        return 1;
+    }
+
+    return 0;
+}
+
+static int cmd_move(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "usage: move <source> <destination>\n");
+        return 2;
+    }
+
+    if (rename(argv[1], argv[2]) == 0) {
+        return 0;
+    }
+
+    if (errno == EXDEV) {
+        return move_fallback_link_unlink(argv[1], argv[2]);
+    }
+
+    perror("rename");
+    return 1;
+}
+
+static int cmd_delete(int argc, char *argv[]) {
+    struct stat st;
+    char answer[8];
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: delete <path>\n");
+        return 2;
+    }
+
+    if (lstat(argv[1], &st) != 0) {
+        perror("lstat");
+        return 1;
+    }
+
+    printf("delete '%s'? [y/N]: ", argv[1]);
+    fflush(stdout);
+    if (!fgets(answer, sizeof(answer), stdin)) {
+        fprintf(stderr, "delete canceled\n");
+        return 1;
+    }
+
+    if (!(answer[0] == 'y' || answer[0] == 'Y')) {
+        fprintf(stderr, "delete canceled\n");
+        return 1;
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+        if (rmdir(argv[1]) != 0) {
+            perror("rmdir");
             return 1;
         }
-
-        if (argv[i + 1] != NULL && os_write_all(fd, " ", 1) < 0) {
-            perror(label);
+    } else {
+        if (unlink(argv[1]) != 0) {
+            perror("unlink");
             return 1;
         }
     }
 
-    if (os_write_all(fd, "\n", 1) < 0) {
-        perror(label);
+    return 0;
+}
+
+static int cmd_create(int argc, char *argv[]) {
+    int fd;
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: create <filename>\n");
+        return 2;
+    }
+
+    fd = open(argv[1], O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        perror("open");
+        return 1;
+    }
+
+    if (close(fd) != 0) {
+        perror("close");
         return 1;
     }
 
     return 0;
 }
 
-static int builtin_inscribe(char **argv) {
-    if (argv[1] == NULL || argv[2] == NULL) {
-        fprintf(stderr, "inscribe: usage inscribe <file> <text>\n");
+static int cmd_makedir(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: makedir <dirname>\n");
+        return 2;
+    }
+
+    if (mkdir(argv[1], 0755) != 0) {
+        perror("mkdir");
         return 1;
     }
 
-    int fd = open(argv[1], O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd == -1) {
-        perror("inscribe");
-        return 1;
-    }
-
-    int status = write_joined_arguments(fd, argv, 2, "inscribe");
-    close(fd);
-    return status;
+    return 0;
 }
 
-static int builtin_etch(char **argv) {
-    if (argv[1] == NULL || argv[2] == NULL) {
-        fprintf(stderr, "etch: usage etch <file> <text>\n");
+static int cmd_removedir(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: removedir <dirname>\n");
+        return 2;
+    }
+
+    if (rmdir(argv[1]) != 0) {
+        perror("rmdir");
         return 1;
     }
 
-    int fd = open(argv[1], O_CREAT | O_WRONLY | O_APPEND, 0644);
-    if (fd == -1) {
-        perror("etch");
-        return 1;
-    }
-
-    int status = write_joined_arguments(fd, argv, 2, "etch");
-    close(fd);
-    return status;
+    return 0;
 }
 
-static int builtin_peek(char **argv) {
-    if (argv[1] == NULL) {
-        fprintf(stderr, "peek: missing filename\n");
+static int cmd_read(int argc, char *argv[]) {
+    int fd;
+    ssize_t n;
+    char buf[4096];
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: read <filename>\n");
+        return 2;
+    }
+
+    fd = open(argv[1], O_RDONLY);
+    if (fd < 0) {
+        perror("open");
         return 1;
     }
 
-    int fd = open(argv[1], O_RDONLY);
-    if (fd == -1) {
-        perror("peek");
-        return 1;
-    }
-
-    char buffer[BUFFER_SIZE];
-    ssize_t bytes = 0;
-    while ((bytes = read(fd, buffer, sizeof(buffer))) > 0) {
-        if (os_write_all(STDOUT_FILENO, buffer, (size_t)bytes) < 0) {
-            perror("peek");
-            close(fd);
-            return 1;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t m = write(STDOUT_FILENO, buf + written, (size_t)(n - written));
+            if (m < 0) {
+                perror("write");
+                close(fd);
+                return 1;
+            }
+            written += m;
         }
     }
 
-    if (bytes < 0) {
-        perror("peek");
+    if (n < 0) {
+        perror("read");
         close(fd);
         return 1;
     }
 
-    close(fd);
+    if (close(fd) != 0) {
+        perror("close");
+        return 1;
+    }
+
     return 0;
 }
 
-static int builtin_vanish(char **argv) {
-    if (argv[1] == NULL) {
-        fprintf(stderr, "vanish: missing path\n");
+static int cmd_write(int argc, char *argv[]) {
+    int fd;
+    int i;
+
+    if (argc < 3) {
+        fprintf(stderr, "usage: write <filename> <text...>\n");
+        return 2;
+    }
+
+    fd = open(argv[1], O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (fd < 0) {
+        perror("open");
         return 1;
     }
 
-    if (unlink(argv[1]) != 0) {
-        perror("vanish");
-        return 1;
-    }
-    return 0;
-}
+    for (i = 2; i < argc; ++i) {
+        const char *part = argv[i];
+        size_t len = strlen(part);
+        size_t written = 0;
 
-static int builtin_nest(char **argv) {
-    if (argv[1] == NULL) {
-        fprintf(stderr, "nest: missing directory name\n");
-        return 1;
-    }
-
-    if (mkdir(argv[1], 0755) != 0) {
-        perror("nest");
-        return 1;
-    }
-    return 0;
-}
-
-static int builtin_sweep(char **argv) {
-    const char *path = argv[1] ? argv[1] : ".";
-    DIR *dir = opendir(path);
-    if (dir == NULL) {
-        perror("sweep");
-        return 1;
-    }
-
-    struct dirent *entry = NULL;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
+        while (written < len) {
+            ssize_t n = write(fd, part + written, len - written);
+            if (n < 0) {
+                perror("write");
+                close(fd);
+                return 1;
+            }
+            written += (size_t)n;
         }
-        printf("%s\n", entry->d_name);
-    }
 
-    closedir(dir);
-    return 0;
-}
-
-static int builtin_recall(struct ShellState *state) {
-    history_print(&state->history);
-    return 0;
-}
-
-static int builtin_help(void) {
-    printf("Custom shell commands:\n");
-    printf("  drift <dir>            Change current directory\n");
-    printf("  ground                 Print current directory\n");
-    printf("  forge <file>           Create or clear a file\n");
-    printf("  inscribe <file> <txt>  Write text into a file\n");
-    printf("  etch <file> <txt>      Append text into a file\n");
-    printf("  peek <file>            Print file contents\n");
-    printf("  vanish <file>          Delete a file\n");
-    printf("  nest <dir>             Create a directory\n");
-    printf("  sweep [dir]            List directory contents\n");
-    printf("  recall                 Show command history\n");
-    printf("  summon <prog> [args]   Launch an OS program with execve\n");
-    printf("  help                   Show this help\n");
-    printf("  quit                   Exit shell\n\n");
-    printf("Supports pipes (|), redirection (<, >, >>), and background jobs (&).\n");
-    return 0;
-}
-
-bool builtin_is_name(const char *name) {
-    static const char *const builtins[] = {
-        "drift", "ground", "forge", "inscribe", "etch", "peek",
-        "vanish", "nest", "sweep", "recall", "help", "quit"
-    };
-
-    if (name == NULL) {
-        return false;
-    }
-
-    for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
-        if (strcmp(name, builtins[i]) == 0) {
-            return true;
+        if (i + 1 < argc) {
+            if (write(fd, " ", 1) != 1) {
+                perror("write");
+                close(fd);
+                return 1;
+            }
         }
     }
 
-    return false;
+    if (write(fd, "\n", 1) != 1) {
+        perror("write");
+        close(fd);
+        return 1;
+    }
+
+    if (close(fd) != 0) {
+        perror("close");
+        return 1;
+    }
+
+    return 0;
 }
 
-int builtin_dispatch(struct ShellState *state, struct Command *cmd, bool *should_exit) {
-    if (cmd->argv[0] == NULL) {
+void print_help(void) {
+    puts("Custom shell commands:");
+    puts("  whereami                    Show current working directory");
+    puts("  showfiles                   List files in current directory");
+    puts("  enter <path>                Change working directory");
+    puts("  move <source> <dest>        Move or rename a path");
+    puts("  rename <old> <new>          Rename a path");
+    puts("  delete <path>               Delete file or empty directory (with confirmation)");
+    puts("  create <filename>           Create empty file");
+    puts("  makedir <dirname>           Create directory");
+    puts("  removedir <dirname>         Remove empty directory");
+    puts("  read <filename>             Print file contents");
+    puts("  write <filename> <text...>  Append text to file");
+    puts("  history                     Show command history");
+    puts("  help                        Show this help message");
+    puts("  exit                        Exit shell");
+}
+
+int execute_command(int argc, char *argv[], History *history, int *should_exit) {
+    (void)history;
+
+    if (argc == 0) {
         return 0;
     }
 
-    if (should_exit != NULL) {
-        *should_exit = false;
+    if (strcmp(argv[0], "whereami") == 0) {
+        return cmd_whereami(argc, argv);
     }
-
-    if (strcmp(cmd->argv[0], "drift") == 0) {
-        return builtin_drift(cmd->argv);
+    if (strcmp(argv[0], "showfiles") == 0) {
+        return cmd_showfiles(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "ground") == 0) {
-        return builtin_ground();
+    if (strcmp(argv[0], "enter") == 0) {
+        return cmd_enter(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "forge") == 0) {
-        return builtin_forge(cmd->argv);
+    if (strcmp(argv[0], "move") == 0) {
+        return cmd_move(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "inscribe") == 0) {
-        return builtin_inscribe(cmd->argv);
+    if (strcmp(argv[0], "rename") == 0) {
+        return cmd_move(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "etch") == 0) {
-        return builtin_etch(cmd->argv);
+    if (strcmp(argv[0], "delete") == 0) {
+        return cmd_delete(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "peek") == 0) {
-        return builtin_peek(cmd->argv);
+    if (strcmp(argv[0], "create") == 0) {
+        return cmd_create(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "vanish") == 0) {
-        return builtin_vanish(cmd->argv);
+    if (strcmp(argv[0], "makedir") == 0) {
+        return cmd_makedir(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "nest") == 0) {
-        return builtin_nest(cmd->argv);
+    if (strcmp(argv[0], "removedir") == 0) {
+        return cmd_removedir(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "sweep") == 0) {
-        return builtin_sweep(cmd->argv);
+    if (strcmp(argv[0], "read") == 0) {
+        return cmd_read(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "recall") == 0) {
-        return builtin_recall(state);
+    if (strcmp(argv[0], "write") == 0) {
+        return cmd_write(argc, argv);
     }
-    if (strcmp(cmd->argv[0], "help") == 0) {
-        return builtin_help();
+    if (strcmp(argv[0], "help") == 0) {
+        print_help();
+        return 0;
     }
-    if (strcmp(cmd->argv[0], "quit") == 0) {
-        if (should_exit != NULL) {
-            *should_exit = true;
+    if (strcmp(argv[0], "history") == 0) {
+        history_print(history);
+        return 0;
+    }
+    if (strcmp(argv[0], "exit") == 0) {
+        if (argc > 2) {
+            fprintf(stderr, "usage: exit [status]\n");
+            return 2;
+        }
+        if (argc == 2) {
+            *should_exit = atoi(argv[1]);
+        } else {
+            *should_exit = 0;
         }
         return 0;
     }
 
-    fprintf(stderr, "Unknown built-in command: %s\n", cmd->argv[0]);
-    return 1;
+    fprintf(stderr, "unknown command: %s\n", argv[0]);
+    return 127;
 }

@@ -1,17 +1,18 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -Werror -std=c11 -g
-TARGET = customsh
-SRC = src/main.c src/history.c src/parser.c src/builtins.c src/executor.c src/os_utils.c
+CC = cc
+CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -O2
+INCLUDES = -Iinclude
+SRC = src/main.c src/parser.c src/builtins.c src/history.c
+TARGET = xjsh
 
 all: $(TARGET)
-
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
-
-clean:
-	rm -f $(TARGET)
 
 run: $(TARGET)
 	./$(TARGET)
 
-.PHONY: all clean run
+$(TARGET): $(SRC)
+	$(CC) $(CFLAGS) $(INCLUDES) $(SRC) -o $(TARGET)
+
+clean:
+	rm -f $(TARGET)
+
+.PHONY: all run clean
